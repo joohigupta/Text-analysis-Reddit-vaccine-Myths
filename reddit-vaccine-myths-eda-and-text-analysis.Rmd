@@ -1,0 +1,1188 @@
+---
+title: "Reddit Vaccine Myths EDA and Text Analysis"
+author: "kheirallah Samaha"
+date: "16/Apr/2021"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 5
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+```
+
+### Introduction
+
+Vaccines are among the greatest public health achievements of modern times. They have saved and continue to save millions of lives throughout the world.
+
+Over the past few decades vaccine hesitancy has emerged as a major public health problem. The reasons for vaccine refusal are complex and differ according to geographical and cultural context. This concern is fueled by misinformation and propagated through organized anti-vaccine groups.
+
+### About the Data set:
+
+#### Content
+
+-   title - relevant for posts
+
+-   score - relevant for posts - based on impact, number of comments
+
+-   id - unique id for posts/comments
+
+-   url - relevant for posts - url of post thread
+
+-   commns_num - relevant for post - number of comments to this post
+
+-   created - date of creation
+
+-   body - relevant for posts/comments - text of the post or comment
+
+-   timestamp - timestamp
+
+    
+I would like to point out here that I have not removed any of the profanities or curse words, because Firstly, they are few compared to other words. Secondly, you all and I want to feel and know what people think about vaccination, regardless of the words used. 
+
+```{r load labraries, include=FALSE}
+
+library(tidyverse)
+library(magrittr) # using different pipes %$% for sentimentR package
+library(lubridate)
+library(scales)
+library(wordcloud)
+library(plotly)
+library(skimr)
+library(janitor)
+library(tidytext)
+library(sentimentr)
+library(widyr)
+library(igraph)
+library(ggraph)
+library(formattable)
+
+theme_set(theme_light())
+
+```
+
+### Read the Reddit Vaccine Myths data
+
+```{r Read Data}
+
+reddit_vm <- read_csv("../input/reddit-vaccine-myths/reddit_vm.csv") %>% 
+  clean_names()
+
+glimpse(reddit_vm)
+
+```
+
+Rows: 1,485
+
+Columns: 8,
+
+### EDA
+
+#### Summary
+
+```{r Summary}
+
+reddit_vm %>% summary()
+
+```
+
+Let's find out if there are duplicated IDs
+
+#### ID duplicates
+
+```{r ID duplicats}
+
+reddit_vm %>% select(id) %>%
+  anyDuplicated()
+
+	
+```
+
+Fairly good, but I'd rather have a lot of ID duplicates, so we can track how the ID feels over time.
+
+It is OK lets move on!
+
+As usual I will convert the text to lower case
+
+#### Convert to lower case and create a new variable "date"
+
+```{r Convert to lower case and create date variable}
+
+reddit_vm <- reddit_vm %>% 
+   mutate(across(where(is.character), tolower)) %>% 
+  mutate(date = as_date(timestamp)) %>%
+  clean_names()
+
+glimpse(reddit_vm)
+
+
+```
+
+Although the date function is used in lubridate package, I will use the word "date" throughout my code writing. it is easy to remember.
+
+#### Missing data
+
+```{r Missing data}
+
+reddit_vm %>% skim() %>%
+  filter(n_missing != 0) %>%
+  as_tibble() %>%
+  select(skim_variable, n_missing, complete_rate) %>%
+  mutate(missing_rate = round(abs(complete_rate - 1) * 100, 1)) %>%
+  ggplot(aes(
+    x = fct_reorder(skim_variable, n_missing),
+    y = missing_rate,
+    fill = skim_variable,
+    label = paste0(missing_rate, "%")
+  )) +
+  geom_col() +
+  geom_text(
+    size = 4.5,
+    hjust = 1.5,
+    vjust = 0.25,
+    col = "white"
+  ) +
+  coord_flip() +
+  theme(legend.position = "none") +
+  scale_y_continuous(label = label_percent(scale = 1)) +
+  scale_fill_manual(values = c("#e41a1c",
+                               "#984ea3")) +
+  labs(
+    title = "Missing Data rate using skimr package",
+    subtitle = "Plot, Missing Data distribution",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "Variable name",
+    y = "Count"
+  )
+
+Url_NA_Count <- sum(!complete.cases(reddit_vm$url))
+body_NA_Count <- sum(!complete.cases(reddit_vm$body))
+
+```
+
+-   Only body and url have missing values
+
+-   url has the most missing values: `r Url_NA_Count`
+
+-   body: `r body_NA_Count`
+
+#### Let's count by year and month then weekdays and years
+
+```{r title per year}
+
+reddit_vm %>%
+  select(date) %>%
+  mutate(year = year(date)) %>%
+  count(year, sort = TRUE) %>%
+  ggplot(aes(x = year,
+             y = n,
+             label = n)) +
+  geom_line(show.legend = FALSE,
+            col = "steelblue",
+            size = 2) +
+  geom_label(
+    vjust = -0.5,
+    size = 4,
+    col = "darkgreen",
+    label.size = 1
+  ) +
+  scale_fill_viridis(discrete = TRUE, option = "E") +
+  scale_y_continuous(expand = expansion(add = c(15, 100))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  theme(strip.background = element_rect(fill = "black")) +
+  theme(strip.text = element_text(colour = 'white')) +
+  labs(
+    title = "Number of Titles per year",
+    subtitle = "Line plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "Year",
+    y = "Number of Titles"
+  )
+
+```
+
+The posts started in 2014, from 2015 to the end of 2018 we see very low posts publications, we do not know why!
+
+Is it a promotion issue or a content management issue?
+
+on the other hand and Knowing that the COVID-19 pandemic began in December 2019 and January 2020, we note that the publications in 2020 are less than the publications in 2019. 
+I think, during the pandemic, I suspect that people were very careful to express their thoughts about the vaccine!
+
+#### Year and Month
+
+```{r year and month, fig.height=9, fig.width=9}
+
+
+NTitles_year_months <- reddit_vm %>% 
+  select(date) %>% 
+  mutate(year = year(date),
+                     month = month(date, label = TRUE)) %>% 
+  count(year, month, sort = TRUE)
+
+formattable(head(NTitles_year_months, 12),
+            col.names = c("Year", "Month", "Total # of Titles"),
+            align = c("r", rep("r", NCOL(n) - 1)),
+            list(n = formatter("span",
+  style = n ~ style(
+    display = "inline-block",
+    direction = "rtl",
+    "border-radius" = "8px",
+    "padding-right" = "2px",
+    "background-color" = csscolor("#1b7837"),
+    width = percent(proportion(n)),
+    "font-family" = "verdana",
+    "font-size" = 10,
+    color = csscolor("white")
+  ))))
+
+
+mean_and_median_year <- NTitles_year_months %>% group_by(year) %>% 
+  summarise(Mean_per_year = round(mean(n),1),
+            Median_per_year = median(n))
+
+formattable(mean_and_median_year,
+            col.names = c("Year", "Mean", "Median"),
+            align = c("r", rep("r", NCOL(year) - 1)),
+            list(Mean_per_year = formatter("span",
+  style = Mean_per_year ~ style(
+    display = "inline-block",
+    direction = "rtl",
+    "border-radius" = "8px",
+    "padding-right" = "2px",
+    "background-color" = csscolor("#1b7837"),
+    width = percent(proportion(Mean_per_year)),
+    "font-family" = "verdana",
+    "font-size" = 10,
+    color = csscolor("white")
+  ))))
+  
+  
+
+ggplot(NTitles_year_months, aes(
+    x = month,
+    y = n,
+    label = n,
+    fill = month
+  )) +
+  geom_col(show.legend = FALSE) +
+  geom_text(vjust = -0.5, size = 3) +
+  facet_wrap(vars(year), scales = "free_x") +
+  scale_fill_viridis(discrete = TRUE, option = "E") +
+  scale_y_continuous(expand = expansion(add = c(0, 10))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  theme(strip.background = element_rect(fill = "black")) +
+  theme(strip.text = element_text(colour = 'white')) +
+  labs(
+    title = "Number of Titles per year and month",
+    subtitle = "column Plot and facet wrap",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "Month",
+    y = "Number of Titles"
+  )
+  
+
+```
+
+According to this dataset, April 2019 and May 2019 have the most published posts, then we've noticed a' low interest in this topic (Vaccine myth) up to the present time! Although the Corona pandemic had begun at the end of 2019.
+
+#### Weekdays, Month and Year, removing 2015, 2016, 2017 and 2018.
+
+```{r weekdays and month and year, fig.height=9, fig.width=9}
+
+
+NTitles_year_months_weekdays <- reddit_vm %>% mutate(
+  year = year(date),
+  month = month(date, label = TRUE),
+  weekdays =  weekdays(date),
+  dayandyear = paste(weekdays, year, sep = "-")
+) %>%
+  filter(year %in% c("2014", "2019", "2020", "2021")) %>%
+  count(year, weekdays, month, dayandyear, sort = TRUE)
+
+
+formattable(head(NTitles_year_months_weekdays,14),
+            col.names = c("Year", "WeekDays", "Month", "Day and Year", "Total # of Titles"),
+            align = c("r", rep("r", NCOL(n) - 1)),
+            list(n = formatter("span",
+  style = n ~ style(
+    display = "inline-block",
+    direction = "rtl",
+    "border-radius" = "8px",
+    "padding-right" = "2px",
+    "background-color" = csscolor("#1b7837"),
+    width = percent(proportion(n)),
+    "font-family" = "verdana",
+    "font-size" = 10,
+    color = csscolor("white")
+  ))))
+
+
+  ggplot(NTitles_year_months_weekdays, aes(
+    x = month,
+    y = n,
+    label = n,
+    fill = as.factor(year)
+  )) +
+  geom_col(show.legend = TRUE) +
+  geom_text(vjust = -0.5, size = 3) +
+  facet_wrap(vars(dayandyear), scales = "free_x") +
+  scale_fill_viridis(discrete = TRUE, option = "E") +
+  scale_y_continuous(expand = expansion(add = c(0, 10))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  theme(strip.background = element_rect(fill = "#253494")) +
+  theme(strip.text = element_text(colour = 'white', size = 11, face = "bold"))+
+  theme(legend.position = "top") +
+  labs(
+    title = "Number of Titles per Year and Month and Weekdays",
+    subtitle = "column Plot and facet wrap",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "Month",
+    y = "Number of Titles",
+    fill = "Year"
+  )
+  
+  
+
+```
+
+2019 has the majority posts, and Fridays in Apr and May are the majority, as well as Wednesdays 2019!
+
+#### The Most Participant (ID) per year and their score base in Comments!
+
+```{r Most Participant and score, fig.height=9, fig.width=9}
+
+# summary(reddit_vm$comms_num)
+
+reddit_vm %>% select(id, comms_num, date, score) %>% 
+  filter(comms_num > 10) %>%
+  mutate(year = year(date),
+         comms_numscore = paste(comms_num, score, sep = "-")) %>% 
+    count(comms_num, id, year, comms_numscore) %>% 
+  ggplot(aes(
+    x = id,
+    y = comms_num,
+    label = comms_numscore,
+    fill = id
+  )) +
+  geom_col(show.legend = FALSE) +
+  geom_text(vjust = 0, hjust = -0.1, size = 3, angle = 90) +
+  facet_wrap(vars(year), ncol = 2, scales = "free_x") +
+  scale_fill_viridis(discrete = TRUE, option = "E") +
+  scale_y_continuous(expand = expansion(add = c(0, 650))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  theme(strip.background = element_rect(fill = "#081d58")) +
+  theme(strip.text = element_text(colour = 'yellow', size = 11)) +
+  labs(
+    title = "The Most Participant (ID) per year and their score",
+    subtitle = "column Plot and facet wrap",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "ID",
+    y = "Number of Titles"
+  )
+
+
+```
+
+ID 21zc6n has the highest comments and score (598 - 1188)
+
+I am curious to read his post let us find out.
+
+```{r ID 21zc6n}
+
+ID_21zc6n <- reddit_vm %>% filter(id == "21zc6n") %>% select(title, body, id, comms_num, score)
+
+formattable(ID_21zc6n)
+
+```
+
+
+**"i would rage if this was handed to me..."** I believe it was one of the first posts, therefor got a lot of comments, Maybe?
+
+Anyway lets move on...
+
+### Sentiments Analysis
+
+#### Data Selection
+
+```{r Data Selection for text analysis}
+
+reddit_vm_text <- reddit_vm %>% select(body, id, score)
+
+```
+
+#### Load lexicons (Bing, Afinn and NRC)
+
+**Opinion Lexicon of Bing Liu (Hu and Liu, 2004)** manually selected lexicon of around 6800 terms, only positive and negative.
+
+**aFinn (Nielsen, 2011)**, Lexicon of words manually rated for valence scores with an integer between -5 and 5.
+
+**NRC Hashtag Sentiment Lexicon (Mohammad et al., 2013)** This open source lexicon was key in the winning entry for the last two years. It is a large, automatically compiled resource that uses seed hashtags that carry unambiguous, strong sentiment as proxy for true tweet sentiment.
+
+```{r load lexicons bing and  affinn and nrc }
+
+bing_lexicon <-  read_csv("../input/bing-nrc-afinn-lexicons/Bing.csv")
+afinn_lexicon <-  read_csv("../input/bing-nrc-afinn-lexicons/Afinn.csv")
+nrc_lexicon <-  read_csv("../input/bing-nrc-afinn-lexicons/NRC.csv")
+
+```
+
+### Data preparation for Sentiment Analysis
+
+Load the stop words table and then clean the text and calculate the word counts.
+
+```{r Data prep}
+
+
+StopWords <- get_stopwords(source = "smart")
+
+reddit_vm_text <- reddit_vm_text %>% 
+  unnest_tokens(output = word, input = body) %>%
+  anti_join(StopWords, by = "word") %>%
+  filter(str_detect(word, "[:alpha:]"),
+         word == gsub('\\b\\w{1,2}\\b','',word),
+         word == gsub(pattern = "\\www\\w*", "", word),
+         !word %in% c("http", "https")
+  )
+
+```
+
+#### Create a Function for word network plots base on id_words and word_correlations dfs
+
+```{r Create a Function for word network plots }
+
+words_connections_plot <- function(reddit_vm_text,
+                                   min_word_count = 25,
+                                   min_correlation = 0.3) { 
+  id_words <- reddit_vm_text %>%
+    select(word) %>%
+    count(word, name = "word_count") %>%
+    filter(word_count >= min_word_count)
+  
+  word_correlations <- reddit_vm_text %>%
+    select(-score) %>%
+    semi_join(id_words, by = "word") %>%
+    pairwise_cor(item = word, feature = id) %>%
+    filter(correlation >= min_correlation)
+  
+  graph_from_data_frame(d = word_correlations,
+                        vertices = id_words %>%
+                          semi_join(word_correlations, by = c("word" = "item1"))) %>%
+    ggraph(layout = "fr") +
+    geom_edge_link(aes(edge_color = correlation), edge_width = 1.4 ) +
+    geom_node_point(size = 3.6) +
+    geom_node_text(aes(color = word_count, label = name), repel = TRUE) +
+    labs(col = "Word \nCount") +
+    theme_void()
+
+}
+
+```
+
+#### Words count and correlations, min count 25, min cor 0.30
+
+```{r Words count 25 min cor 0.30, fig.height=6, fig.width=8}
+
+set.seed(1967)
+
+reddit_vm_text %>%
+  words_connections_plot(min_word_count = 25, min_correlation = 0.30) +
+  theme(panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    size = 2
+  )) +
+    scale_colour_gradient(low = "gray", high = "#a65628") +
+  scale_edge_color_continuous(low = "gray", high = "red") +
+  labs(
+    title = "Words count and corrolations, min count 25, min cor 0.30",
+    subtitle = "Network Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths"
+  )
+
+
+```
+
+The most correlated words: side and effect, immune system, chickenpox, PMC and article and outbreak, and measles...
+
+Let's set the minimum correlation to be 0.35
+
+#### Words count and correlations, min count 30, min cor 0.35
+
+```{r Words count 30 min cor 0.35, fig.height=6, fig.width=8}
+
+set.seed(1967)
+
+reddit_vm_text %>%
+  words_connections_plot(min_word_count = 30, min_correlation = 0.35) +
+  theme(panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    size = 1
+  )) +
+    scale_colour_gradient(low = "gray", high = "#a65628") +
+  scale_edge_color_continuous(low = "gray", high = "red") +
+  labs(
+    title = "Words count and corrolations, min count 30, min cor 0.35",
+    subtitle = "Network Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths"
+  )
+
+```
+
+As you can see the most used word are: vaccine, autism, measles, study, and mercury...
+The most used word are strain, measles, MMR, outbreak, health, immune system, infection, disease virus.
+
+by the way, MMR is Measles, Mumps, Rubella (MMR).
+
+upper right side, flu, year, influenza, shot, and mercury and thimerosal.
+
+lower left side, bad faith, and children, vaccination and study...
+
+Those words are indicating to fears, unknown, bad history, and children protective actions
+
+let us zoom in more!
+#### Words count and correlations, min count 50, min cor 0.35
+
+```{r Words count 50 min cor 0.35, fig.height=6, fig.width=8}
+
+set.seed(1967)
+
+reddit_vm_text %>%
+  words_connections_plot(min_word_count = 50, min_correlation = 0.35) +
+  theme(panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    size = 1
+  )) +
+    scale_colour_gradient(low = "gray", high = "#a65628") +
+  scale_edge_color_continuous(low = "gray", high = "red") +
+  labs(
+    title = "Words count and corrolations, min count 50, min cor 0.35",
+    subtitle = "Network Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths"
+  )
+
+```
+
+Same result of the previous plot we still using the minimum correlation as 0.35..
+
+#### Words count and correlations, min count 100, min cor 0.25
+
+```{r Words count 100 min cor 0.25, fig.height=6, fig.width=8}
+set.seed(1967)
+
+reddit_vm_text %>%
+  words_connections_plot(min_word_count = 100, min_correlation = 0.25) +
+  theme(panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    size = 1
+  )) +
+    scale_colour_gradient(low = "gray", high = "#a65628") +
+  scale_edge_color_continuous(low = "gray", high = "red") +
+  labs(
+    title = "Words count and corrolations, min count 100, min cor 0.25",
+    subtitle = "Network Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths"
+  )
+
+```
+
+Measles, children, study and vaccination are used more than 100 times and the correlation is more than 0.25
+
+### Generate plots by score (low \< 3 and high \>= 3) (Bing lexicon)
+
+```{r Generate plots by score}
+
+
+reddit_vm_text %>% count(score, sort = TRUE)
+
+reddit_vm_text_lscore <- reddit_vm_text %>%
+filter(score < 3)
+
+reddit_vm_text.hscore <- reddit_vm_text %>%
+filter(score >= 3)
+
+```
+
+#### Using same plotting function
+
+##### Low Score, min count 50, min cor 0.25
+
+```{r Low Score, fig.height=6, fig.width=8}
+
+set.seed(2021)
+
+reddit_vm_text_lscore %>%
+	  words_connections_plot(min_word_count = 50, min_correlation = 0.25) +
+  theme(panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    size = 1
+  )) +
+    scale_colour_gradient(low = "gray", high = "#a65628") +
+  scale_edge_color_continuous(low = "gray", high = "red") +
+  labs(
+    title = "The Most words used by Participant (ID) with low score, min count 50, min cor 0.25",
+    subtitle = "Network Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths"
+  )
+ 
+
+
+```
+
+Participants have Low score:
+
+High correlations: mercury, thimersal, mmr, measles, autism, vaccinated and unvaccinated risk and children vaccination
+
+Word Count: measles, vaccine, autism.
+
+##### High score, min count 20, min cor 0.30
+
+```{r High score, fig.height=6, fig.width=8}
+
+set.seed(1967)
+
+reddit_vm_text.hscore %>%
+  words_connections_plot(min_word_count = 20, min_correlation = 0.30) +
+  theme(panel.border = element_rect(
+    colour = "black",
+    fill = NA,
+    size = 1
+  )) +
+    scale_colour_gradient(low = "gray", high = "#a65628") +
+  scale_edge_color_continuous(low = "gray", high = "red") +
+  labs(
+    title = "The Most words used by Participant (ID) with high score, min count 20, min cor 0.30",
+    subtitle = "Network Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths"
+  )
+
+```
+
+Participants have High score:
+
+High correlations: influenza and flu, vaccination and study, thimersal, mmr, measles, autism, risk and children vaccination
+
+Word Count: measles, vaccine, autism.
+
+No big difference between high score and Low score Participants...
+
+#### sentimentR package
+
+Before starting the sentiment analysis, I want to check the count of the negation word NOT! the Not is when used with an auxiliary verb to form the negative. for example:
+
+'I am not happy'. A regular Sentiment Analysis Algorithm would just flag this sentence as positive because of the word 'happy', But reading this sentence we know this is not a positive sentence.
+
+therefore I am going to use **sentimentr** package.
+
+**sentimentr package**
+
+sentimentr is designed to quickly calculate text polarity sentiment at the sentence level and optionally aggregate by rows or grouping variable(s).
+
+**Why sentimentr?**
+
+sentimentr attempts to take into account valence shifters (i.e., negators, amplifiers (intensifiers), de-amplifiers (downtoners), and adversative conjunctions) while maintaining speed. Simply put, sentimentr is an augmented dictionary lookup. The next questions address why it matters.
+
+Ref: <https://rdocumentation.org/packages/sentimentr/versions/2.7.1>
+
+```{r Sentiments analysis using sentimentR package}
+
+formattable(reddit_vm %>% select(body) %>%
+  unnest_tokens(Trigram, body, token = "ngrams", n = 3) %>%
+  separate(Trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  unite(Trigram, word1, word2, word3, sep = " ") %>%
+  filter(Trigram != "https t.co") %>%
+  count(Trigram ,sort = TRUE) %>% 
+  mutate(not_words = str_extract(Trigram, pattern = "not|Not")) %>%
+    filter(!is.na(not_words)) %>% 
+    head(15) %>% 
+  arrange(desc(n)),
+            align = c("r", rep("r", NCOL(n) - 1)),
+             list(n = formatter("span",
+  style = n ~ style(
+    display = "inline-block",
+    direction = "rtl",
+    "border-radius" = "8px",
+    "padding-right" = "2px",
+    "background-color" = csscolor("#1f78b4"),
+    width = percent(proportion(n)),
+    "font-family" = "verdana",
+    "font-size" = 10,
+    color = csscolor("white")
+  ))))
+
+```
+
+I do think that this number of words "NOT" won't change the posts' sentiment significantly!
+
+#### Network Plot all years
+
+```{r Sentiment plot all years}
+
+senti_plot <- reddit_vm %>% select(score, body, date) %>%
+  filter(!is.na(body)) %>%
+  arrange(date) %>%
+  get_sentences(body) %$%
+  sentiment(body) %>%
+  mutate(sentiment = round(sentiment, 2))
+
+
+formattable(head(senti_plot,15),
+            col.names = c("Element ID", "Sentence ID", "Words Count", "Sentiment Value"),
+            align = c("r", rep("r", NCOL(sentiment) - 1)),
+            list(sentiment = formatter("span",
+  style = sentiment ~ style(
+    display = "inline-block",
+    direction = "rtl",
+    "border-radius" = "8px",
+    "padding-right" = "2px",
+    "background-color" = csscolor("#b15928"),
+    width = percent(proportion(sentiment)),
+    "font-family" = "verdana",
+    "font-size" = 10,
+    color = csscolor("white")
+  ))))
+
+plot(senti_plot)
+
+```
+
+The Emotional valence value for all years collectively is varying between -1.6 and -0.4, which indicates negative emotions about Vaccines.
+
+In the x-axis we see how the value changed per year, although it is a percentage, I have arranged the date in ascending order! to avoid any misleading.
+
+#### Network Plot before 2019
+
+```{r Sentiment plot before 2019}
+
+reddit_vm %>% select(score, body, date) %>% 
+  filter(!is.na(body),
+         date < "2018-12-31") %>% 
+  arrange(date) %>% 
+  get_sentences(body) %$% 
+  sentiment(body) %>% 
+  plot()
+
+```
+
+The Emotional valence value for the years before 2019 varies between -0.05 and 0.1, started by about 0.00 ended by 0.10 through -0.05 that indicates somehow positive emotions about Vaccine.
+
+#### Network Plot for 2019
+
+```{r Sentiment plot for 2019}
+
+
+reddit_vm %>% select(score, body, date) %>%
+  filter(!is.na(body), 
+         date > "2019-01-01" &
+           date < "2020-01-01") %>%
+  arrange(date) %>%
+  get_sentences(body) %$%
+  sentiment(body) %>%
+  plot()
+
+```
+
+The Emotional valence value for 2019 varies between -1.05 and 0.0, started by about -1.05 ended by -0.5 through 0.00 which indicates somehow negative emotions.
+
+#### Network Plot year 2020
+
+```{r Sentiment plot year 2020}
+
+reddit_vm %>% select(score, body, date) %>% 
+  filter(!is.na(body),
+         date > "2020-01-01" &
+           date < "2021-01-01" ) %>% 
+  arrange(date) %>% 
+  get_sentences(body) %$% 
+  sentiment(body) %>% 
+  plot()
+
+```
+
+The Emotional valence value for 2020 varies between -0.3 and 0.1, started by about -0.2 ended by -0.23\~ through \~ 0.1 which indicates to somehow neutral to negative emotions.
+
+#### Network Plot from year 2021 present!
+
+```{r Sentiment plot from year 2021 present}
+
+
+reddit_vm %>% select(score, body, date) %>% 
+  filter(!is.na(body),
+         date > "2021-01-01") %>% 
+  arrange(date) %>% 
+  get_sentences(body) %$% 
+  sentiment(body) %>% 
+  plot()
+
+```
+
+The Emotional valence value for 2020 varies between -0.25 and 0.6, started by about -0.25 ended by 0.6 \~ through \~ 0.1 which indicates somehow positive emotions.
+
+#### By number of words used
+
+```{r Sentiment analysis by number of words used}
+
+reddit_vm %>% select(score, body, date) %>%
+  filter(!is.na(body)) %>%
+  arrange(date) %>%
+  get_sentences(body) %$%
+  sentiment(body) %>%
+  ggplot(aes(x = word_count, y = sentiment)) +
+  geom_line(aes(col = if_else(sentiment > 0 , "red", "blue")),
+            show.legend = FALSE) +
+  labs(fill = "Year") +
+  labs(
+    title = "Sentiment analysis by number of word used",
+    subtitle = "Line Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "Word Count",
+    y = "Sentiment"
+  )
+
+```
+
+Although the Negative Sentiment is slightly more than Positive, If you write a lengthy post you will probably have a Negative sentiment!
+
+#### By element ID
+
+-   element_id - The id number of the original vector passed to sentiment
+
+-   sentence_id - The id number of the sentences within each element_id
+
+-   word_count - Word count
+
+-   sentiment - Sentiment/polarity score
+
+```{r Sentiment analysis by element ID}
+
+reddit_vm %>% select(score, body, date) %>% 
+  filter(!is.na(body)) %>% 
+  arrange(date) %>% 
+  get_sentences(body) %$% 
+  sentiment(body) %>%
+  ggplot(aes(x = element_id, y = sentiment)) +
+  geom_line(aes(col = if_else(sentiment > 0 , "red", "blue")),
+            show.legend = FALSE) +
+  labs(fill = "Year") +
+  labs(
+    title = "Sentiment analysis by element ID",
+    subtitle = "Line Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "element ID",
+    y = "Sentiment"
+  )
+
+
+```
+
+We can say that in this dataset the emotions are Negative, although we noticed a lot of positive emotions!
+
+#### By year using tidytext with Bing lexicon all years
+
+```{r Sentiment analysis per year, fig.height=6, fig.width=7}
+
+
+reddit_vm_senti_body <- reddit_vm %>% select(body, date, score, id)
+
+
+reddit_vm_senti_body %>%
+  unnest_tokens(output = word, input = body) %>%
+  anti_join(StopWords, by = "word") %>%
+  inner_join(bing_lexicon, by = "word") %>%
+  mutate(date = year(date)) %>%
+  group_by(id,date, sentiment) %>%
+  summarise(Count = n()) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = Count,
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative) %>% 
+  ggplot(aes(x = id,
+             y = sentiment)) +
+  geom_col(aes(fill = ifelse(sentiment > 0,"red", "blue")), show.legend = FALSE) +
+  facet_grid(vars(date), scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 90, size = 2)) +
+  theme(legend.position = "none") +
+  labs(fill = "Year") +
+  labs(
+    title = "Sentiment analysis per all years (Bing lexicon)",
+    subtitle = "column Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "Year",
+    y = "Sentiment"
+  )
+
+
+```
+
+Using **Bing lexicon** gave us a Negative conclusion over the years 2019, 2020, and beginning of 2021!
+
+Next plot I will remove the years from 2014 to 2018.
+
+#### By year using tidytext with Bing lexicon from 2019 to 2021
+
+```{r Sentiment analysis from 2019 to 2021}
+
+
+reddit_vm_senti_body %>%
+  unnest_tokens(output = word, input = body) %>%
+  anti_join(StopWords, by = "word") %>%
+  inner_join(bing_lexicon, by = "word") %>%
+  mutate(date = year(date)) %>%
+  filter(date > 2018) %>% 
+  group_by(id,date, sentiment) %>%
+  summarise(Count = n()) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = Count,
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative) %>% 
+  ggplot(aes(x = id,
+             y = sentiment)) +
+  geom_col(aes(fill = ifelse(sentiment > 0,"red", "blue")), show.legend = FALSE) +
+  facet_grid(vars(date), scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 90, size = 2)) +
+  theme(legend.position = "none") +
+  labs(fill = "Year") +
+  labs(
+    title = "Sentiment analysis per all years (Bing lexicon)",
+    subtitle = "column Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "Year",
+    y = "Sentiment"
+  )
+
+
+```
+
+Clear, let us move to the next lexicon Afinn!
+
+#### By year using tidytext with Afinn lexicon
+
+```{r tidytext with Afinn lexicon, fig.height=7, fig.width=9}
+
+
+reddit_vm_senti_body %>% 
+  select(body) %>% 
+  unnest_tokens(output = word, input = body) %>%
+  anti_join(StopWords, by = "word") %>%
+  inner_join(afinn_lexicon, by = "word") %>%
+  group_by(word) %>%
+  summarise(total = sum(value)) %>%
+    filter(!total %in% c(-25:0,0:25)) %>%
+  ggplot(aes(x = fct_reorder(word,-total),
+             y = total)) +
+  geom_col(aes(fill = ifelse(total > 0,"red", "blue")), show.legend = FALSE) +
+    coord_flip()+
+  theme(axis.text.y = element_text(size = 7)) +
+  theme(legend.position = "none") +
+  labs(fill = "Year") +
+  labs(
+    title = "Sentiment analysis per year (Bing lexicon)",
+    subtitle = "column Plot, coord flip",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "Year",
+    y = "Sentiment"
+  )
+
+
+```
+
+**Afinn lexicon** shows us that the words Bad and Good have almost the same number, the difference is about 50 to the word Good!
+
+A lot of anger is expressed by using bad words, indicating mistrust, misinformation, and fears as well.
+
+#### By year using tidytext with NRC lexicon
+
+```{r tidytext with NRC lexicon, fig.height=8, fig.width=8}
+
+
+senti_NRC <- reddit_vm_senti_body %>% 
+  mutate(date = year(date)) %>%
+  filter(date >2018) %>% 
+  unnest_tokens(output = word, input = body) %>%
+  anti_join(StopWords, by = "word") %>%
+  inner_join(nrc_lexicon, by = "word") %>%
+  count(date, sentiment, sort = TRUE) %>%
+  as_tibble()
+
+formattable(head(senti_NRC,15),
+            col.names = c("Year", "Sentiment", "Total Count"),
+            align = c("r", rep("r", NCOL(n) - 1)),
+            list(n = formatter("span",
+  style = n ~ style(
+    display = "inline-block",
+    direction = "rtl",
+    "border-radius" = "8px",
+    "padding-right" = "2px",
+    "background-color" = csscolor("#6a3d9a"),
+    width = percent(proportion(n)),
+    "font-family" = "verdana",
+    "font-size" = 10,
+    color = csscolor("white")
+  ))))
+
+  ggplot(senti_NRC, aes(x = reorder_within(sentiment, -n, date),
+             y = n)) +
+  geom_col(aes(fill = sentiment), show.legend = FALSE) +
+  facet_wrap(vars(date), scales = "free_x") +
+  scale_x_reordered() +
+  theme(axis.text.x = element_text(angle = 90, size = 10)) +
+  theme(legend.position = "none") +
+  labs(fill = "Year") +
+  labs(
+    title = "Sentiment analysis per year (NRC lexicon)",
+    subtitle = "Column Plot",
+    caption = "Data source: Kaggle.com, Reddit Vaccine Myths",
+    x = "Year",
+    y = "Count"
+  )
+
+```
+
+**NRC lexicon**, Positive and Negative have almost the values, I think is the words Bad and Good, maybe??
+
+I think It is clear that the sentiment polarity is Negative.
+
+
+### Word Cloud
+
+#### Regular Word Cloud
+
+```{r Regular Word Cloud}
+
+
+wordcloudplot <- reddit_vm_senti_body %>% 
+  mutate(date = year(date)) %>%
+  filter(date >2018) %>% 
+  unnest_tokens(output = word, input = body) %>%
+  anti_join(StopWords, by = "word") %>%
+  inner_join(nrc_lexicon, by = "word") %>%
+  count(word, sort = TRUE) %>%
+  as_tibble()
+
+set.seed(1967)
+wordcloud(words = wordcloudplot$word, freq = wordcloudplot$n, min.freq = 2,
+          max.words = 300, random.order = FALSE, rot.per = 0.35, 
+          colors = brewer.pal(8, "Accent"))
+
+
+```
+
+Not surprisingly, Measles, Vaccine, Disease, Good and Bad!
+
+#### Comparison cloud bing lexicon
+
+```{r Comparison cloud bing lexicon}
+
+
+reddit_vm_senti_body %>%
+  unnest_tokens(output = word, input = body) %>%
+  anti_join(StopWords, by = "word") %>%
+  inner_join(bing_lexicon, by = "word") %>%
+  count(sentiment, word, sort = TRUE) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = n,
+              values_fill = 0) %>%
+  column_to_rownames(var = "word") %>%
+  comparison.cloud(
+    colors = c("#ff7f00", "#1f78b4"),
+    max.words = 300,
+    title.size = 1.5,
+    title.colors = c("#ff7f00", "#1f78b4")
+  )
+
+```
+
+At the level of words, we can see it is like the POSITIVE and NEGATIVE emotions are very close.
+
+
+Lets see what we will get if we deploy NRS Lexicon.
+
+#### Comparison cloud NRC lexicon
+
+```{r Comparison cloud NRC lexicon}
+
+
+reddit_vm_senti_body %>%
+  unnest_tokens(output = word, input = body) %>%
+  anti_join(StopWords, by = "word") %>%
+  inner_join(nrc_lexicon, by = "word") %>%
+  count(sentiment, word, sort = TRUE) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = n,
+              values_fill = 0) %>%
+  column_to_rownames(var = "word") %>%
+  comparison.cloud(
+    colors = c(
+      "#a6cee3",
+      "#1f78b4",
+      "#b2df8a",
+      "#33a02c",
+      "#fb9a99",
+      "#e31a1c",
+      "#fdbf6f",
+      "#ff7f00",
+      "#cab2d6"
+    ),
+    max.words = 500,
+    title.size = 1.5,
+    title.colors = c(
+      "#a6cee3",
+      "#1f78b4",
+      "#b2df8a",
+      "#33a02c",
+      "#fb9a99",
+      "#e31a1c",
+      "#fdbf6f",
+      "#ff7f00",
+      "#cab2d6"
+    )
+  )
+
+
+```
+
+
+It is clear that the negative feelings dominant the rest of the feelings. 
+
+### Final Note:
+
+There is a lot of Anger and Fear and Sadness in this dataset and there are a lot of positive emotions as well.
+
+What I felt during my work on this notebook was a mix of hope and anger wrapped by a beautiful dream that to back to a normal life Sooner
+
+#### **Reasons for vaccine hesitancy**
+
+-   Concerns about vaccine safety, adverse effects, toxicity, or poor quality of vaccine components.
+
+-   Mistrust of doctors, health authorities, government sources, pharmaceutical companies and scientific research.
+
+-   Doubts about the technology used to produce the vaccine.
+
+-   Lack of information, information sources and influence of antivaccine proponents.
+
+#### **Concerns relating to COVID 19-vaccines:**
+
+-   The novelty of the vaccines; mRNA- and adenovirus-based vaccines are relatively new types of vaccines, compared with most vaccines that are currently available.
+
+-   Mistrust of vaccine benefit.
+
+-   Speed of vaccine development.
+
+
+
+
+| *"The only way to make sense out of change is to plunge into it, move with it, and join the dance."*
+|  *Alan Wilson Watts*
+
+
+
+Thank you all for your reading and support! 
